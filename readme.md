@@ -211,7 +211,7 @@ The config.json file supports the following settings:
 ### JavaScript Output
 
 ```javascript
-'Roboto': (
+'Roboto': {
   'font-family': '"Roboto"',
   'cap-height': 0.712,
   'x-height': 0.525,
@@ -221,7 +221,7 @@ The config.json file supports the following settings:
   'ascender': 0.928,
   'descender': 0.072,
   'lsb-adjust': 0.049,
-),
+},
 ```
 
 ### SCSS Map Output
