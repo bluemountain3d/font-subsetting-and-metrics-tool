@@ -247,6 +247,21 @@ $unicodeRangeOptions = @{
   };
 }
 
+
+
+
+function Get-FontVariantInfo {
+  param ([string]$fontName)
+  
+  $isItalic = $fontName -match 'Italic|Oblique'
+  $isBold = $fontName -match 'Bold'
+  $isRegular = Is-RegularFont -fontName $fontName
+  
+  return "Regular: $isRegular, Bold: $isBold, Italic: $isItalic"
+}
+
+
+
 # Function: Convert-CharactersToUnicodeRange
 # Converts a string of characters to their Unicode code points in the format expected by fontTools
 # This is used for option 7 (Custom Characters) to convert user input to proper Unicode ranges
@@ -941,7 +956,9 @@ foreach ($fontDir in $fontDirsToProcess) {
   foreach ($fontFile in $fontFiles) {
     $fontFileName = $fontFile.Name
     $fontName = [System.IO.Path]::GetFileNameWithoutExtension($fontFileName)
-    Write-Host "  Processing $fontFileName..." -ForegroundColor Cyan
+    $variantInfo = Get-FontVariantInfo -fontName $fontName
+    Write-Host "  Processing $fontFileName... ($variantInfo)" -ForegroundColor Cyan
+    Write-Host "  Starting font processing for: $fontFileName" -ForegroundColor Cyan
 
     # For WOFF/WOFF2 formats, convert to TTF first (since fontTools works better with TTF)
     $tempTTF = $fontFile.FullName
@@ -983,13 +1000,60 @@ foreach ($fontDir in $fontDirsToProcess) {
         # Aggressive optimization: keep only basic glyphs, remove hinting and subroutines
         $commonArgs += " --glyphs-to-keep=`"A-Za-z0-9`" --desubroutinize --no-hinting" 
       }
+    
 
+      
+
+      # Get the base font family name for all variants
+      $baseFontFamily = "Cronos Pro"  # Hard-code your family name, or use Get-BaseFontName function
+      Write-Host "    Base font family name: $baseFontFamily" -ForegroundColor Cyan
+
+      # Create a temporary file with corrected font names before subsetting
+      $tempFixedNameFont = Join-Path -Path $env:TEMP -ChildPath "$fontName-fixed-name.ttf"
+      $fixFontCmd = "python `"$($scriptDir)\fix_font_family_names.py`" `"$tempTTF`" `"$tempFixedNameFont`" `"$baseFontFamily`""
+      $fixResult = Invoke-Expression $fixFontCmd
+
+      # Check if the font name correction was successful
+      if ($fixResult -and $fixResult.StartsWith("SUCCESS:")) {
+        Write-Host "    Font family name corrected: $fixResult" -ForegroundColor Green
+        # Use the fixed font file for subsetting
+        $tempTTF = $tempFixedNameFont
+      }
+      else {
+        Write-Host "    Warning: Could not correct font family name: $fixResult" -ForegroundColor Yellow
+        # Continue with original font file
+      }
+
+
+
+
+      # This is a complete try-catch block for font subsetting
+      # Insert this entire block in the font processing section
       try {
+        # Check if this is an italic font
+        $isItalic = $fontName -match 'Italic|Oblique'
+        if ($isItalic) {
+          Write-Host "    Processing Italic font: $fontName" -ForegroundColor Magenta
+        }
+  
         # Process TTF files
         if ($fontFile.Extension -eq ".ttf" -and $hasTTF) {
           $ttfOutputPath = Join-Path -Path $ttfDir -ChildPath "$fontName-subset.ttf"
-          $ttfCommand = "python -m fontTools.subset `"$tempTTF`" --output-file=`"$ttfOutputPath`" $commonArgs"
+          
+          # Check if this is an italic font
+          $isItalic = $fontName -match 'Italic|Oblique'
+          if ($isItalic) {
+            # Use simplified command for italic fonts
+            Write-Host "    Processing italic font with simplified command..." -ForegroundColor Magenta
+            $ttfCommand = "python -m fontTools.subset `"$tempTTF`" `"$ttfOutputPath`" --unicodes=`"$unicodeRanges`" --no-notdef-outline --ignore-missing-glyphs"
+          }
+          else {
+            # Original command for regular fonts
+            $ttfCommand = "python -m fontTools.subset `"$tempTTF`" --output-file=`"$ttfOutputPath`" $commonArgs"
+          }
+          
           Invoke-Expression $ttfCommand
+          
           if (Test-Path $ttfOutputPath) { 
             Write-Host "    TTF created successfully." -ForegroundColor Green 
           }
@@ -997,11 +1061,24 @@ foreach ($fontDir in $fontDirsToProcess) {
             Write-Host "    Failed to create TTF!" -ForegroundColor Red 
           }
         }
+  
         # Process OTF files
-        elseif ($fontFile.Extension -eq ".otf" -and $hasOTF) {
+        if ($fontFile.Extension -eq ".otf" -and $hasOTF) {
           $otfOutputPath = Join-Path -Path $otfDir -ChildPath "$fontName-subset.otf"
-          $otfCommand = "python -m fontTools.subset `"$tempTTF`" --output-file=`"$otfOutputPath`" $commonArgs"
+    
+          # Use a simpler command for italic fonts based on the test script
+          if ($isItalic) {
+            Write-Host "    Using simplified subsetting for italic font..." -ForegroundColor Yellow
+            $otfCommand = "python -m fontTools.subset `"$tempTTF`" `"$otfOutputPath`" --unicodes=`"$unicodeRanges`" --no-notdef-outline --ignore-missing-glyphs"
+          }
+          else {
+            # Original command for non-italic fonts
+            $otfCommand = "python -m fontTools.subset `"$tempTTF`" --output-file=`"$otfOutputPath`" $commonArgs"
+          }
+    
+          Write-Host "    Running: $otfCommand" -ForegroundColor Gray
           Invoke-Expression $otfCommand
+    
           if (Test-Path $otfOutputPath) { 
             Write-Host "    OTF created successfully." -ForegroundColor Green 
           }
@@ -1013,7 +1090,7 @@ foreach ($fontDir in $fontDirsToProcess) {
         # Create WOFF2 file (from subset TTF/OTF if available, otherwise from original)
         $lowercaseFontName = $fontName.ToLower()
         $woff2OutputPath = Join-Path -Path $woff2Dir -ChildPath "$lowercaseFontName.woff2"
-        
+  
         # Determine input file for WOFF2 conversion
         $inputForWoff2 = if ($fontFile.Extension -eq ".ttf" -and $hasTTF -and (Test-Path $ttfOutputPath)) { 
           $ttfOutputPath  # Use subsetted TTF if available
@@ -1024,18 +1101,47 @@ foreach ($fontDir in $fontDirsToProcess) {
         else { 
           $tempTTF  # Use the original or temporary TTF otherwise
         }
-        
-        # Convert to WOFF2 format
-        python -m fontTools.ttLib.woff2 compress `"$inputForWoff2`" -o `"$woff2OutputPath`"
-        
+
+
+        # Fix the font family name again before WOFF2 conversion
+        $tempFixedNameWoff2 = Join-Path -Path $env:TEMP -ChildPath "$fontName-fixed-name-woff2.ttf"
+        $fixWoff2Cmd = "python `"$($scriptDir)\fix_font_family_names.py`" `"$inputForWoff2`" `"$tempFixedNameWoff2`" `"$baseFontFamily`""
+        Write-Host "    Running WOFF2 name fix: $fixWoff2Cmd" -ForegroundColor Gray
+        $fixWoff2Result = Invoke-Expression $fixWoff2Cmd
+
+        # If name correction was successful, use that file for WOFF2 conversion
+        if ($fixWoff2Result -and $fixWoff2Result.StartsWith("SUCCESS:")) {
+          Write-Host "    Font family name corrected for WOFF2: $fixWoff2Result" -ForegroundColor Green
+          $inputForWoff2 = $tempFixedNameWoff2
+        }
+
+  
+        # For italic fonts, try the simplified command structure from the test script
+        if ($isItalic) {
+          Write-Host "    Using direct conversion for italic font WOFF2..." -ForegroundColor Yellow
+          $woff2Command = "python -m fontTools.ttLib.woff2 compress `"$inputForWoff2`" -o `"$woff2OutputPath`""
+        }
+        else {
+          # Standard command for non-italic fonts
+          $woff2Command = "python -m fontTools.ttLib.woff2 compress `"$inputForWoff2`" -o `"$woff2OutputPath`""
+        }
+  
+        Write-Host "    Running: $woff2Command" -ForegroundColor Gray
+        Invoke-Expression $woff2Command
+  
         if (Test-Path $woff2OutputPath) {
-          Write-Host "    WOFF2 created successfully." -ForegroundColor Green
-          
+          if ($isItalic) {
+            Write-Host "    SUCCESS: Italic font WOFF2 created!" -ForegroundColor Green
+          }
+          else {
+            Write-Host "    WOFF2 created successfully." -ForegroundColor Green
+          }
+    
           # Compress with Brotli for additional file size reduction
           $woff2Compressed = "$woff2OutputPath.br"
           $pythonBrotliCmd = "python `"$pythonBrotliCompressPath`" `"$woff2OutputPath`" `"$woff2Compressed`""
           Invoke-Expression $pythonBrotliCmd
-          
+    
           if (Test-Path $woff2Compressed) { 
             Write-Host "    WOFF2 Brotli compressed." -ForegroundColor Green 
           }
@@ -1043,17 +1149,43 @@ foreach ($fontDir in $fontDirsToProcess) {
         else {
           # Handle WOFF2 conversion failure
           Write-Host "    Failed to create WOFF2!" -ForegroundColor Red
-          "ERROR: WOFF2 creation failed for $fontFileName - $(Get-Date)" | Out-File -FilePath $logPath -Append
-          
-          # Offer retry (except in batch mode)
-          $retry = if ($operationMode -eq "3") { "n" } else { Read-Host "Retry WOFF2 conversion? (Y/n)" }
-          if ($retry -ne "n" -and $retry -ne "N") {
-            python -m fontTools.ttLib.woff2 compress `"$inputForWoff2`" -o `"$woff2OutputPath`"
-            if (Test-Path $woff2OutputPath) { 
-              Write-Host "    WOFF2 created successfully on retry." -ForegroundColor Green 
+    
+          # For italic fonts, try a fallback direct Python approach similar to the test script
+          if ($isItalic) {
+            Write-Host "    Trying fallback approach for italic font..." -ForegroundColor Yellow
+      
+            # Create a temporary Python script
+            $pythonScriptPath = Join-Path -Path $subsettedDir -ChildPath "convert_woff2.py"
+            $pythonDirectCommand = @"
+from fontTools.ttLib.woff2 import compress
+compress('$($inputForWoff2.Replace('\', '\\'))', '$($woff2OutputPath.Replace('\', '\\'))')
+"@
+      
+            $pythonDirectCommand | Out-File -FilePath $pythonScriptPath -Encoding utf8
+            Write-Host "    Running fallback Python script: $pythonScriptPath" -ForegroundColor Gray
+            python $pythonScriptPath
+      
+            if (Test-Path $woff2OutputPath) {
+              Write-Host "    SUCCESS: Italic font WOFF2 created with fallback method!" -ForegroundColor Green
             }
-            else { 
-              Write-Host "    Retry failed!" -ForegroundColor Red 
+            else {
+              Write-Host "    Fallback method also failed for italic font." -ForegroundColor Red
+              "ERROR: WOFF2 creation failed for italic font $fontFileName - $(Get-Date)" | Out-File -FilePath $logPath -Append
+            }
+          }
+          else {
+            "ERROR: WOFF2 creation failed for $fontFileName - $(Get-Date)" | Out-File -FilePath $logPath -Append
+      
+            # Offer retry (except in batch mode)
+            $retry = if ($operationMode -eq "3") { "n" } else { Read-Host "Retry WOFF2 conversion? (Y/n)" }
+            if ($retry -ne "n" -and $retry -ne "N") {
+              Invoke-Expression $woff2Command
+              if (Test-Path $woff2OutputPath) { 
+                Write-Host "    WOFF2 created successfully on retry." -ForegroundColor Green 
+              }
+              else { 
+                Write-Host "    Retry failed!" -ForegroundColor Red 
+              }
             }
           }
         }
@@ -1063,95 +1195,95 @@ foreach ($fontDir in $fontDirsToProcess) {
         Write-Host "    Error processing font: $_" -ForegroundColor Red
         "ERROR: $_ - $(Get-Date)" | Out-File -FilePath $logPath -Append
       }
-    }
 
-    # Metrics extraction section - Only extract metrics for regular font variants
-    if (Is-RegularFont -fontName $fontName) {
-      $baseFontName = Get-BaseFontName -fontName $fontName
+      # Metrics extraction section - Only extract metrics for regular font variants
+      if (Is-RegularFont -fontName $fontName) {
+        $baseFontName = Get-BaseFontName -fontName $fontName
       
-      # Skip if we've already processed metrics for this font family
-      if (-not $processedFontFamilies.ContainsKey($baseFontName)) {
-        Write-Host "    Extracting font metrics for $baseFontName..." -ForegroundColor Cyan
+        # Skip if we've already processed metrics for this font family
+        if (-not $processedFontFamilies.ContainsKey($baseFontName)) {
+          Write-Host "    Extracting font metrics for $baseFontName..." -ForegroundColor Cyan
         
-        # Set up temporary path for individual metrics
-        $singleMetricsPath = Join-Path -Path $subsettedDir -ChildPath "$fontName-metrics.$formatType"
-        $pythonCmd = "python `"$pythonExtractMetricsPath`" `"$tempTTF`" `"$singleMetricsPath`" $formatType"
+          # Set up temporary path for individual metrics
+          $singleMetricsPath = Join-Path -Path $subsettedDir -ChildPath "$fontName-metrics.$formatType"
+          $pythonCmd = "python `"$pythonExtractMetricsPath`" `"$tempTTF`" `"$singleMetricsPath`" $formatType"
         
-        try {
-          # Run metrics extraction
-          Invoke-Expression $pythonCmd
+          try {
+            # Run metrics extraction
+            Invoke-Expression $pythonCmd
           
-          if (Test-Path $singleMetricsPath) {
-            $metricsContent = Get-Content -Path $singleMetricsPath -Raw
+            if (Test-Path $singleMetricsPath) {
+              $metricsContent = Get-Content -Path $singleMetricsPath -Raw
             
-            try {
-              # Use Out-File instead of Add-Content to avoid file locking issues
-              $existingContent = if (Test-Path $metricsFilePath) { 
-                Get-Content -Path $metricsFilePath -Raw -ErrorAction SilentlyContinue 
-              }
-              else { 
-                "" 
-              }
+              try {
+                # Use Out-File instead of Add-Content to avoid file locking issues
+                $existingContent = if (Test-Path $metricsFilePath) { 
+                  Get-Content -Path $metricsFilePath -Raw -ErrorAction SilentlyContinue 
+                }
+                else { 
+                  "" 
+                }
               
-              # Append new metrics to existing file
-              $newContent = $existingContent + $metricsContent
-              $newContent | Out-File -FilePath $metricsFilePath -Force
+                # Append new metrics to existing file
+                $newContent = $existingContent + $metricsContent
+                $newContent | Out-File -FilePath $metricsFilePath -Force
     
-              # Clean up temporary file and mark as processed
-              Remove-Item -Path $singleMetricsPath
-              $processedFontFamilies[$baseFontName] = $true
-              Write-Host "    Metrics saved for $baseFontName" -ForegroundColor Green
+                # Clean up temporary file and mark as processed
+                Remove-Item -Path $singleMetricsPath
+                $processedFontFamilies[$baseFontName] = $true
+                Write-Host "    Metrics saved for $baseFontName" -ForegroundColor Green
     
-              # Add OpenType features information to metrics file if applicable
-              if ($operationMode -eq "1" -or $operationMode -eq "3") {
-                if ($featuresString -ne "none" -and $featuresString -ne "") {
-                  $featuresComment = "// $baseFontName open type features: $featuresString`r`n"
-                  $existingContent = Get-Content -Path $metricsFilePath -Raw -ErrorAction SilentlyContinue
-                  $newContent = $existingContent + $featuresComment
-                  $newContent | Out-File -FilePath $metricsFilePath -Force
+                # Add OpenType features information to metrics file if applicable
+                if ($operationMode -eq "1" -or $operationMode -eq "3") {
+                  if ($featuresString -ne "none" -and $featuresString -ne "") {
+                    $featuresComment = "// $baseFontName open type features: $featuresString`r`n"
+                    $existingContent = Get-Content -Path $metricsFilePath -Raw -ErrorAction SilentlyContinue
+                    $newContent = $existingContent + $featuresComment
+                    $newContent | Out-File -FilePath $metricsFilePath -Force
+                  }
                 }
               }
+              catch {
+                # Handle errors when writing to metrics file
+                Write-Host "    Error writing metrics file: $_" -ForegroundColor Red
+                "ERROR: Failed to write metrics file for $fontFileName - $_ - $(Get-Date)" | Out-File -FilePath $logPath -Append
+              }
             }
-            catch {
-              # Handle errors when writing to metrics file
-              Write-Host "    Error writing metrics file: $_" -ForegroundColor Red
-              "ERROR: Failed to write metrics file for $fontFileName - $_ - $(Get-Date)" | Out-File -FilePath $logPath -Append
+            else {
+              Write-Host "    Failed to extract metrics!" -ForegroundColor Red
             }
           }
-          else {
-            Write-Host "    Failed to extract metrics!" -ForegroundColor Red
+          catch {
+            # Handle errors during metrics extraction
+            Write-Host "    Error extracting metrics: $_" -ForegroundColor Red
+            "ERROR: Metrics extraction failed for $fontFileName - $_ - $(Get-Date)" | Out-File -FilePath $logPath -Append
           }
         }
-        catch {
-          # Handle errors during metrics extraction
-          Write-Host "    Error extracting metrics: $_" -ForegroundColor Red
-          "ERROR: Metrics extraction failed for $fontFileName - $_ - $(Get-Date)" | Out-File -FilePath $logPath -Append
+        else {
+          # Skip duplicate metrics extraction
+          Write-Host "    Skipping duplicate metrics for $baseFontName" -ForegroundColor Yellow
         }
       }
       else {
-        # Skip duplicate metrics extraction
-        Write-Host "    Skipping duplicate metrics for $baseFontName" -ForegroundColor Yellow
+        # Skip metrics extraction for non-regular fonts
+        Write-Host "    Skipping metrics extraction for non-regular font $fontName (still processed for subsetting)" -ForegroundColor Yellow
       }
-    }
-    else {
-      # Skip metrics extraction for non-regular fonts
-      Write-Host "    Skipping metrics extraction for non-regular font" -ForegroundColor Gray
-    }
 
-    # Clean up temporary files
-    if ($fontFile.Extension -in ".woff", ".woff2" -and (Test-Path $tempTTF)) {
-      Remove-Item $tempTTF
-    }
+      # Clean up temporary files
+      if ($fontFile.Extension -in ".woff", ".woff2" -and (Test-Path $tempTTF)) {
+        Remove-Item $tempTTF
+      }
 
-    # Add processing summary for this font
-    $summary += [PSCustomObject]@{
-      FontFolder       = $fontDirName
-      FontName         = $baseFontName
-      Status           = "Success"
-      MetricsExtracted = (Test-Path $metricsFilePath)
-      WOFF2Size        = if ($woff2OutputPath -and (Test-Path $woff2OutputPath)) { (Get-Item $woff2OutputPath).Length / 1KB } else { 0 }
-      # BrotliSize      = if ($woff2Compressed -and (Test-Path $woff2Compressed)) { (Get-Item $woff2Compressed).Length / 1KB } else { 0 }
-      Features         = $featuresString
+      # Add processing summary for this font
+      $summary += [PSCustomObject]@{
+        FontFolder       = $fontDirName
+        FontName         = $baseFontName
+        Status           = "Success"
+        MetricsExtracted = (Test-Path $metricsFilePath)
+        WOFF2Size        = if ($woff2OutputPath -and (Test-Path $woff2OutputPath)) { (Get-Item $woff2OutputPath).Length / 1KB } else { 0 }
+        # BrotliSize      = if ($woff2Compressed -and (Test-Path $woff2Compressed)) { (Get-Item $woff2Compressed).Length / 1KB } else { 0 }
+        Features         = $featuresString
+      }
     }
   }
 }
